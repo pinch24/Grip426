@@ -1,0 +1,645 @@
+[change 1]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\PhysicsEngine\BodyInstance.h
+
+struct FBodyInstnace;
+
+// Engine Modification //
+#if WITH_PHYSX
+namespace physx
+{
+	class PxContactModifyPair;
+}
+#endif // WITH_PHYSX
+// Engine Modification //
+
+#define USE_BODYINSTANCE_DEBUG_NAMES ((WITH_EDITORONLY_DATA || UE_BUILD_DEBUG || LOOKING_FOR_PERF_ISSUES || CHAOS_CHECKED) && !(UE_BUILD_SHIPPING || UE_BUILD_TEST) && !NO_LOGGING)
+
+
+
+
+[change 2]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\PhysicsEngine\BodyInstance.h
+
+/** Extra mask for filtering. Look at declaration for logic */
+FMaskFilter MaskFilter;
+
+// Engine Modification //
+/** The local bounds for the body (use CalculateLocalBounds to calculate this first) */
+FBox LocalBounds;
+// Engine Modification //
+
+/**
+* Type of collision enabled.
+
+
+
+
+[change 3]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\PhysicsEngine\BodyInstance.h
+
+/** Override the default max angular velocity */
+UPROPERTY(EditAnywhere, Category = Physics, meta = (editcondition = "bSimulatePhysics", InlineEditConditionToggle))
+uint8 bOverrideMaxAngularVelocity : 1;
+
+// Engine Modification //
+/** Force the center the mass to be the center of the body. (Center of mass offset can then also be used for absolute offset)*/
+UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadWrite, Category = Physics, meta = (DisplayName = "Centralize Mass"))
+	uint32 bCentraliseMass : 1; // So we can balance the vehicles properly.
+
+/**	Should inertia tensor be overridden? */
+UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Physics)
+	uint32 bOverrideInertiaTensor : 1; // So we can customise mass response.
+
+/** The inertia tensor to use or this object - will subsequently be scaled by mass.*/
+UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Physics, meta = (editcondition = "bOverrideInertiaTensor"))
+	FVector InertiaTensor;
+// Engine Modification //
+
+/** 
+	* @HACK:
+
+
+
+
+[change 4]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\PhysicsEngine\BodyInstance.h
+
+UPROPERTY(EditAnywhere, AdvancedDisplay, BlueprintReadOnly, Category = Physics)
+	uint8 VelocitySolverIterationCount;
+
+	// Engine Modification //
+	/** Calculate the local bounds for the body */
+	const FBox& CalculateLocalBounds(const FVector& scale)
+	{
+		UpdateBodyScale(scale, true); return LocalBounds;
+	}
+	// Engine Modification //
+
+private:
+	/** Custom Channels for Responses*/
+
+
+
+
+[change 5]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\PhysicsEngine\BodyInstance.h
+
+static EDOFMode::Type ResolveDOFMode(EDOFMode::Type DOFMode);
+
+	// Engine Modification //
+#if WITH_PHYSX
+	void ModifyContact(physx::PxContactModifyPair& pair, uint32 pairIndex, const FBodyInstance* other) const;
+#endif
+	// Engine Modification //
+
+	/** [Physx Only] Constraint used to allow for easy DOF setup per bodyinstance */
+	FConstraintInstance* DOFConstraint;
+
+
+
+
+[change 6]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+#include "PhysicsEngine/PhysicsSettings.h"
+
+// Engine Modification //
+/** Structures and classes used for modifying collision contacts, eventually entering the ModifyContact function of an AActor. */
+
+struct FBodyInstanceContactModifyCallback : public FContactModifyCallback
+{
+	virtual ~FBodyInstanceContactModifyCallback() { }
+
+	/**
+	\brief Passes modifiable arrays of contacts to the application.
+
+	The initial contacts are as determined fresh each frame by collision detection.
+
+	The number of contacts can not be changed, so you cannot add your own contacts.  You may however
+	disable contacts using PxContactSet::ignore().
+
+	@see PxContactModifyPair
+	*/
+	virtual void onContactModify(PxContactModifyPair* const pairs, PxU32 count) override
+	{
+		for (PxU32 i = 0; i < count; i++)
+		{
+			auto& pair = pairs[i];
+
+			const PxActor* PActor0 = pair.actor[0];
+			const PxActor* PActor1 = pair.actor[1];
+			check(PActor0 && PActor1);
+
+			const PxRigidBody* PRigidBody0 = PActor0->is<PxRigidBody>();
+			const PxRigidBody* PRigidBody1 = PActor1->is<PxRigidBody>();
+
+			const FBodyInstance* BodyInst0 = FPhysxUserData::Get<FBodyInstance>(PActor0->userData);
+			const FBodyInstance* BodyInst1 = FPhysxUserData::Get<FBodyInstance>(PActor1->userData);
+
+			if (BodyInst0 != BodyInst1)
+			{
+				if (BodyInst0 != NULL &&
+					BodyInst0->bContactModification)
+				{
+					BodyInst0->ModifyContact(pair, 0, BodyInst1);
+				}
+
+				if (BodyInst1 != NULL &&
+					BodyInst1->bContactModification)
+				{
+					BodyInst1->ModifyContact(pair, 1, BodyInst0);
+				}
+			}
+		}
+	}
+};
+
+/** Interface for the creation of contact modify callbacks. */
+class FBodyInstanceContactModifyCallbackFactory : public IContactModifyCallbackFactory
+{
+public:
+
+	virtual FContactModifyCallback* Create(FPhysScene_PhysX* PhysScene) override
+	{
+		return new FBodyInstanceContactModifyCallback();
+	}
+
+	virtual void Destroy(FContactModifyCallback* Callback) override
+	{
+		delete Callback;
+	}
+};
+
+class FBodyInstanceContactModifyCallbackInstanciator
+{
+public:
+
+	FBodyInstanceContactModifyCallbackInstanciator()
+	{
+		FPhysScene_PhysX::ContactModifyCallbackFactory = TSharedPtr<IContactModifyCallbackFactory>(new FBodyInstanceContactModifyCallbackFactory());
+	}
+};
+
+static FBodyInstanceContactModifyCallbackInstanciator BodyInstanceContactModifyCallbackFactory;
+
+void FBodyInstance::ModifyContact(physx::PxContactModifyPair& pair, uint32 pairIndex, const FBodyInstance* other) const
+{
+	if (other != nullptr &&
+		OwnerComponent.IsValid() &&
+		other->OwnerComponent.IsValid())
+	{
+		auto actor0 = OwnerComponent->GetOwner();
+		auto actor1 = other->OwnerComponent->GetOwner();
+
+		if (actor0 != nullptr &&
+			actor1 != nullptr)
+		{
+			actor0->ModifyContact(pairIndex, actor1, pair.contacts);
+		}
+	}
+}
+// Engine Modification //
+
+DECLARE_CYCLE_STAT(TEXT("Init Body"), STAT_InitBody, STATGROUP_Physics);
+
+
+
+
+[change 7]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+, MaskFilter(0)
+// Engine Modification //
+, LocalBounds(EForceInit::ForceInit)
+// Engine Modification //
+, CollisionEnabled(ECollisionEnabled::QueryAndPhysics)
+
+
+
+
+[change 8]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+, bOverrideMaxAngularVelocity(false)
+// Engine Modification //
+, bCentraliseMass(false)
+, bOverrideInertiaTensor(false)
+, InertiaTensor(1.0f, 1.0f, 1.0f)
+// Engine Modification //
+, bOverrideMaxDepenetrationVelocity(false)
+
+
+
+
+[change 9]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+	}
+}
+
+// Engine Modification //
+TAutoConsoleVariable<int32> CVehicleRestOffset(TEXT("p.VehicleRestOffset"), 3, TEXT("The rest offset for vehicles."));
+TAutoConsoleVariable<int32> CVehicleContactOffset(TEXT("p.VehicleContactOffset"), 5, TEXT("The contact offset for vehicles."));
+// Engine Modification //
+
+void FInitBodiesHelperBase::UpdateSimulatingAndBlendWeight()
+
+
+
+
+[change 10]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+	return false;
+}
+
+// Engine Modification //
+LocalBounds = FBox(EForceInit::ForceInit);
+// Engine Modification //
+
+bool bSuccess = false;
+
+
+
+
+[change 11]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+FPhysicsCommand::ExecuteWrite(ActorHandle, [&](const FPhysicsActorHandle& Actor)
+{
+	TArray<PxShape *> PShapes;
+	TArray<FPhysicsShapeHandle> Shapes;
+	GetAllShapes_AssumesLocked(Shapes);
+	ScaleMode = ComputeScaleMode(Shapes);
+
+	// Engine Modification //
+	auto minOffset = FVector(+1000000.0f, +1000000.0f, +1000000.0f);
+	auto maxOffset = FVector(-1000000.0f, -1000000.0f, -1000000.0f);
+	// Engine Modification //
+
+	FVector AdjustedScale3D;
+	FVector AdjustedScale3DAbs;
+
+
+
+
+[change 12]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+if (PSphereGeom.isValid())
+{
+	// Engine Modification //
+	auto centre = NewTranslation;
+	auto offset = PSphereGeom.radius;
+
+	minOffset = minOffset.ComponentMin(FVector(centre.X - offset, centre.Y - offset, centre.Z - offset));
+	maxOffset = maxOffset.ComponentMax(FVector(centre.X + offset, centre.Y + offset, centre.Z + offset));
+	// Engine Modification //
+
+	UpdatedGeometry = &PSphereGeom;
+	bSuccess = true;
+}
+
+
+
+
+[change 13]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+case ECollisionShapeType::Box:
+{
+	FKBoxElem* BoxElem = ShapeElem->GetShapeCheck<FKBoxElem>();
+	PxBoxGeometry& PBoxGeom = GeoCollection.GetBoxGeometry();
+
+	PBoxGeom.halfExtents.x = FMath::Max((0.5f * BoxElem->X * AdjustedScale3DAbs.X), FCollisionShape::MinBoxExtent());
+	PBoxGeom.halfExtents.y = FMath::Max((0.5f * BoxElem->Y * AdjustedScale3DAbs.Y), FCollisionShape::MinBoxExtent());
+	PBoxGeom.halfExtents.z = FMath::Max((0.5f * BoxElem->Z * AdjustedScale3DAbs.Z), FCollisionShape::MinBoxExtent());
+
+	LocalTransform = BoxElem->GetTransform() * RelativeTM;
+	LocalTransform.ScaleTranslation(AdjustedScale3D);
+
+	if (PBoxGeom.isValid())
+	{
+		// Engine Modification //
+		auto centre = LocalTransform.GetTranslation();
+		auto offset = LocalTransform.TransformVector(FVector(PBoxGeom.halfExtents.x, PBoxGeom.halfExtents.y, PBoxGeom.halfExtents.z));
+
+		minOffset = minOffset.ComponentMin(centre - offset);
+		maxOffset = maxOffset.ComponentMax(centre - offset);
+
+		minOffset = minOffset.ComponentMin(centre + offset);
+		maxOffset = maxOffset.ComponentMax(centre + offset);
+		// Engine Modification //
+
+		UpdatedGeometry = &PBoxGeom;
+		bSuccess = true;
+	}
+
+
+
+
+[change 14]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+case ECollisionShapeType::Capsule:
+{
+	FKSphylElem* SphylElem = ShapeElem->GetShapeCheck<FKSphylElem>();
+	ensure(ScaleMode == EScaleMode::LockedXY || ScaleMode == EScaleMode::LockedXYZ);
+
+	float ScaleRadius = FMath::Max(AdjustedScale3DAbs.X, AdjustedScale3DAbs.Y);
+	float ScaleLength = AdjustedScale3DAbs.Z;
+
+	PxCapsuleGeometry& PCapsuleGeom = GeoCollection.GetCapsuleGeometry();
+
+	// this is a bit confusing since radius and height is scaled
+	// first apply the scale first 
+	float Radius = FMath::Max(SphylElem->Radius * ScaleRadius, 0.1f);
+	float Length = SphylElem->Length + SphylElem->Radius * 2.f;
+	float HalfLength = Length * ScaleLength * 0.5f;
+	Radius = FMath::Min(Radius, HalfLength);	//radius is capped by half length
+	Radius = FMath::Max(Radius, FCollisionShape::MinCapsuleRadius()); // bounded by minimum limit.
+	float HalfHeight = HalfLength - Radius;
+	HalfHeight = FMath::Max(FCollisionShape::MinCapsuleAxisHalfHeight(), HalfHeight);
+
+	PCapsuleGeom.halfHeight = FMath::Max(HalfHeight, KINDA_SMALL_NUMBER);
+	PCapsuleGeom.radius = FMath::Max(Radius, KINDA_SMALL_NUMBER);
+
+	LocalTransform.SetTranslation(RelativeTM.TransformPosition(SphylElem->Center));
+	LocalTransform.SetRotation(SphylElem->Rotation.Quaternion() * U2PSphylBasis_UE); // #PHYS2 we probably want to put this behind the interface?
+	LocalTransform.ScaleTranslation(AdjustedScale3D);
+
+	if (PCapsuleGeom.isValid())
+	{
+		// Engine Modification //
+		auto centre = LocalTransform.TransformPosition(FVector(PCapsuleGeom.halfHeight, 0.0f, 0.0f));
+		auto offset = PCapsuleGeom.radius;
+
+		minOffset = minOffset.ComponentMin(FVector(centre.X - offset, centre.Y - offset, centre.Z - offset));
+		maxOffset = maxOffset.ComponentMax(FVector(centre.X + offset, centre.Y + offset, centre.Z + offset));
+
+		centre = LocalTransform.TransformPosition(FVector(-PCapsuleGeom.halfHeight, 0.0f, 0.0f));
+
+		minOffset = minOffset.ComponentMin(FVector(centre.X - offset, centre.Y - offset, centre.Z - offset));
+		maxOffset = maxOffset.ComponentMax(FVector(centre.X + offset, centre.Y + offset, centre.Z + offset));
+		// Engine Modification //
+
+		UpdatedGeometry = &PCapsuleGeom;
+		bSuccess = true;
+	}
+
+
+
+
+[change 15, 16]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+case ECollisionShapeType::Convex:
+{
+	FKConvexElem* ConvexElem = ShapeElem->GetShapeCheck<FKConvexElem>();
+	PxConvexMeshGeometry& PConvexGeom = GeoCollection.GetConvexGeometry();
+
+	bool bUseNegX = CalcMeshNegScaleCompensation(AdjustedScale3D, LocalTransform);
+
+	PConvexGeom.convexMesh = bUseNegX ? ConvexElem->GetMirroredConvexMesh() : ConvexElem->GetConvexMesh();
+	PConvexGeom.scale.scale = U2PVector(AdjustedScale3DAbs);
+
+	// Engine Modification //
+	// I'm pretty sure this TransformRotation is wrong and should be SetRotation.
+	// But I daren't change it for fear of breaking currently expected behaviour.
+	// Engine Modification //
+
+	LocalTransform.TransformRotation(RelativeTM.GetRotation());
+	LocalTransform.ScaleTranslation(AdjustedScale3D);
+
+	if (PConvexGeom.isValid())
+	{
+		// Engine Modification //
+		auto centre = PConvexGeom.convexMesh->getLocalBounds().getCenter();
+		auto offset = PConvexGeom.convexMesh->getLocalBounds().getExtents();
+
+		auto centreV = FVector(centre.x, centre.y, centre.z);
+		auto offsetV = LocalTransform.TransformVector(FVector(offset.x, offset.y, centre.z));
+
+		minOffset = minOffset.ComponentMin((centreV - offsetV) * AdjustedScale3DAbs);
+		maxOffset = maxOffset.ComponentMax((centreV - offsetV) * AdjustedScale3DAbs);
+
+		minOffset = minOffset.ComponentMin((centreV + offsetV) * AdjustedScale3DAbs);
+		maxOffset = maxOffset.ComponentMax((centreV + offsetV) * AdjustedScale3DAbs);
+		// Engine Modification //
+
+		UpdatedGeometry = &PConvexGeom;
+		bSuccess = true;
+	}
+
+
+
+
+[change 17]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+#endif // !(UE_BUILD_SHIPPING || UE_BUILD_TEST)
+			}
+		}
+
+		// Engine Modification //
+		LocalBounds = FBox(minOffset, maxOffset);
+		// Engine Modification //
+	});
+
+
+
+
+[change 18]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+TMap<FBodyInstance*, FWeldedBatch> BodyToShapes;
+
+// Engine Modification //
+auto restOffset = CVehicleRestOffset.GetValueOnGameThread();
+auto contactOffset = CVehicleContactOffset.GetValueOnGameThread();
+// Engine Modification //
+
+for (const FPhysicsShapeHandle& Shape : Shapes) //sort all welded children by their original bodies
+
+
+
+
+[change 19]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+for (const FPhysicsShapeHandle& Shape : Shapes) //sort all welded children by their original bodies
+{
+	// Engine Modification //
+	if (bOverrideInertiaTensor == true &&
+		Shape.IsValid() == true)
+	{
+		Shape.Shape->setRestOffset(restOffset);
+		Shape.Shape->setContactOffset(contactOffset);
+	}
+	// Engine Modification //
+	if (FWeldInfo* WeldInfo = ShapeToBodiesMap->Find(Shape))
+
+
+
+
+[change 20]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\BodyInstance.cpp
+
+PxQuat MassOrientation;
+const FVector MassSpaceInertiaTensor = P2UVector(PxMassProperties::getMassSpaceInertia(TotalMassProperties.inertiaTensor, MassOrientation));
+
+// Engine Modification //
+if (bOverrideInertiaTensor == true)
+{
+	FPhysicsInterface::SetMassSpaceInertiaTensor_AssumesLocked(Actor, FVector(InertiaTensor.X * TotalMassProperties.mass, InertiaTensor.Y * TotalMassProperties.mass, InertiaTensor.Z * TotalMassProperties.mass));
+}
+else
+{
+	FPhysicsInterface::SetMassSpaceInertiaTensor_AssumesLocked(Actor, MassSpaceInertiaTensor);
+}
+
+if (bCentraliseMass == true)
+{
+	FTransform Com = FTransform(COMNudge);
+	FPhysicsInterface::SetComLocalPose_AssumesLocked(Actor, Com);
+}
+else
+{
+	FTransform Com(P2UQuat(MassOrientation), P2UVector(TotalMassProperties.centerOfMass));
+	FPhysicsInterface::SetComLocalPose_AssumesLocked(Actor, Com);
+}
+// Engine Modification //
+//FPhysicsInterface::SetMassSpaceInertiaTensor_AssumesLocked(Actor, MassSpaceInertiaTensor);
+//FPhysicsInterface::SetMass_AssumesLocked(Actor, TotalMassProperties.mass);
+
+FTransform Com(P2UQuat(MassOrientation), P2UVector(TotalMassProperties.centerOfMass));
+FPhysicsInterface::SetComLocalPose_AssumesLocked(Actor, Com);
+
+
+
+
+[change 21]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\GameFramework\Actor.h
+
+struct FNetworkObjectInfo;
+
+// Engine Modification //
+#if WITH_PHYSX
+namespace physx
+{
+	class PxContactSet;
+}
+#endif
+// Engine Modification //
+
+/** Chooses a method for actors to update overlap state (objects it is touching) on initialization, currently only used during level streaming. */
+
+
+
+
+[change 22]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Classes\GameFramework\Actor.h
+
+UFUNCTION(BlueprintImplementableEvent, meta=(DisplayName = "Hit"), Category="Collision")
+	void ReceiveHit(class UPrimitiveComponent* MyComp, AActor* Other, class UPrimitiveComponent* OtherComp, bool bSelfMoved, FVector HitLocation, FVector HitNormal, FVector NormalImpulse, const FHitResult& Hit);
+
+	// Engine Modification //
+#if WITH_PHYSX
+	/** Modify a collision contact. */
+	virtual bool ModifyContact(uint32 bodyIndex, AActor* other, physx::PxContactSet& contacts)
+	{
+		return false;
+	}
+#endif // WITH_PHYSX
+	// Engine Modification //
+
+	/** Set the lifespan of this actor. When it expires the object will be destroyed. If requested lifespan is 0, the timer is cleared and the actor will not be destroyed. */
+
+
+
+
+[change 23]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Public\Physics\PhysicsInterfacePhysX.h
+
+static void AddAngularImpulseInRadians_AssumesLocked(const FPhysicsActorHandle_PhysX& InHandle, const FVector& InTorque);
+// Engine Modification //
+static void AddForce_AssumesLocked(const FPhysicsActorHandle_PhysX& InHandle, const FVector& InForce);
+// Engine Modification //
+static void AddVelocity_AssumesLocked(const FPhysicsActorHandle_PhysX& InHandle, const FVector& InForce);
+
+
+
+
+[change 24]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Public\Physics\PhysicsInterfacePhysX.h
+
+static void AddAngularVelocityInRadians_AssumesLocked(const FPhysicsActorHandle_PhysX& InHandle, const FVector& InTorque);
+// Engine Modification //
+static void AddForceAtLocation_AssumesLocked(const FPhysicsActorHandle_PhysX& InHandle, const FVector& InImpulse, const FVector& InLocation);
+// Engine Modification //
+static void AddImpulseAtLocation_AssumesLocked(const FPhysicsActorHandle_PhysX& InHandle, const FVector& InImpulse, const FVector& InLocation);
+
+
+
+
+[change 25]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\PhysicsCore\Private\ChaosEngineInterface.cpp
+
+PMaterial->setDynamicFriction(InMaterial->Friction);
+//PMaterial->setRestitution(InMaterial->Restitution);
+// Engine Modification //
+PMaterial->setRestitution(FMath::Clamp(InMaterial->Restitution, 0.0f, 1.0f));
+// Engine Modification //
+
+
+
+
+[change 26]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\PhysicsInterfacePhysX.cpp
+
+void FPhysicsInterface_PhysX::AddAngularImpulseInRadians_AssumesLocked(const FPhysicsActorHandle_PhysX& InActorHandle, const FVector& InTorque)
+{
+	if(PxRigidBody* Body = GetPx<PxRigidBody>(InActorHandle))
+	{
+		Body->addTorque(U2PVector(InTorque), PxForceMode::eIMPULSE);
+	}
+}
+
+// Engine Modification //
+void FPhysicsInterface_PhysX::AddForce_AssumesLocked(const FPhysicsActorHandle_PhysX& InActorHandle, const FVector& InForce)
+{
+	if (PxRigidBody* Body = GetPx<PxRigidBody>(InActorHandle))
+	{
+		Body->addForce(U2PVector(InForce), PxForceMode::eFORCE);
+	}
+}
+// Engine Modification //
+
+void FPhysicsInterface_PhysX::AddVelocity_AssumesLocked(const FPhysicsActorHandle_PhysX& InActorHandle, const FVector& InForce)
+
+
+
+
+[change 27]
+C:\Program Files\Epic Games\UE_4.26\Engine\Source\Runtime\Engine\Private\PhysicsEngine\PhysicsInterfacePhysX.cpp
+
+void FPhysicsInterface_PhysX::AddAngularVelocityInRadians_AssumesLocked(const FPhysicsActorHandle_PhysX& InActorHandle, const FVector& InTorque)
+{
+	if(PxRigidBody* Body = GetPx<PxRigidBody>(InActorHandle))
+	{
+		Body->addTorque(U2PVector(InTorque), PxForceMode::eVELOCITY_CHANGE);
+	}
+}
+
+// Engine Modification //
+void FPhysicsInterface_PhysX::AddForceAtLocation_AssumesLocked(const FPhysicsActorHandle_PhysX& InActorHandle, const FVector& InImpulse, const FVector& InLocation)
+{
+	if (PxRigidBody* Body = GetPx<PxRigidBody>(InActorHandle))
+	{
+		PxRigidBodyExt::addForceAtPos(*Body, U2PVector(InImpulse), U2PVector(InLocation), PxForceMode::eFORCE);
+	}
+}
+// Engine Modification //
+
+void FPhysicsInterface_PhysX::AddImpulseAtLocation_AssumesLocked(const FPhysicsActorHandle_PhysX& InActorHandle, const FVector& InImpulse, const FVector& InLocation)
+
